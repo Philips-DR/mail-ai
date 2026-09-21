@@ -90,6 +90,17 @@ with no way to tell which is right.
 - **`review` must stay read-only.** If reading a draft needs approval, approving becomes two
   approvals and people stop reading the thing they are approving.
 
+## Approval previews
+
+`send_draft` and `discard_draft` declare, in MCP's `_meta`, that a caller should show
+`review_draft`'s output before asking anyone to approve them. Their arguments are opaque
+identifiers — `{draft_id, confirmation}` names no recipient and no subject — so a gate that
+shows arguments shows nothing worth approving.
+
+The declaration is advisory: a caller may ignore it, and one that honours it must still
+check the named tool is read-only itself. What this side owes is that `review_draft` stays
+read-only and keeps rendering every recipient it fingerprints, including `bcc`.
+
 ## Scopes
 
 Narrowest that works, added by the milestone that earns them, and each in **its own token

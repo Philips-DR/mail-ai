@@ -37,7 +37,34 @@ from mailai.operations import (
     sync_mailbox,
 )
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
+
+
+def approval_preview(preview_tool: str, argument_map: dict[str, str], field: str | None = None) -> dict:
+    """Declare how a caller should show this tool's effect before approving it.
+
+    A destructive tool whose arguments are opaque identifiers cannot be approved
+    meaningfully from its arguments alone: "send_draft(draft_id, confirmation)" says
+    nothing about who the mail is going to or what it says. This points a caller at the
+    read-only tool that renders the effect, so the approval prompt can show the email
+    rather than two hashes.
+
+    The contract, carried in MCP's `_meta`:
+
+        preview_tool   a READ-ONLY tool on this same server
+        argument_map   {preview tool's parameter: this tool's parameter}
+        field          which key of the preview's JSON result to display, if not all of it
+
+    A caller is free to ignore this. A caller that honours it must still verify the named
+    tool is read-only, because a "preview" that acted would be a hole rather than a help.
+    """
+    return {
+        "approval": {
+            "preview_tool": preview_tool,
+            "argument_map": argument_map,
+            **({"field": field} if field else {}),
+        }
+    }
 
 
 @dataclass(frozen=True)
@@ -220,6 +247,10 @@ def create_mail_ai_server(paths: ServerPaths, auth: AuthConfig,
             read_only_hint=False, destructive_hint=True, idempotent_hint=False,
             open_world_hint=True,
         ),
+        # Without this, approving a send means approving {draft_id, confirmation} -- two
+        # opaque strings. The gate in sending.py guarantees the draft is the one SOMEBODY
+        # read; this is what lets the person actually approving it be that somebody.
+        meta=approval_preview("review_draft", {"draft_id": "draft_id"}, field="rendered"),
     )
     def _send_draft(draft_id: str, confirmation: str) -> dict:
         try:
@@ -234,6 +265,7 @@ def create_mail_ai_server(paths: ServerPaths, auth: AuthConfig,
         annotations=ToolAnnotations(
             read_only_hint=False, destructive_hint=True, open_world_hint=True
         ),
+        meta=approval_preview("review_draft", {"draft_id": "draft_id"}, field="rendered"),
     )
     def _discard_draft(draft_id: str) -> dict:
         try:
