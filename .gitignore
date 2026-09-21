@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Credentials and mailbox data. Never committed.
+credentials.json
+client_secret_*.json
+token.json
+*.sqlite3
