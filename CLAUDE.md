@@ -36,6 +36,28 @@ to the wrong person.
 - Remove Gmail's `gmail_quote` wrapper *before* stripping tags, or the quoted history
   survives as unattributed prose.
 
+## Live-verified against a real mailbox (2026-09-21)
+
+First run on a real INBOX: 25 messages, 24 threads, full sync. Second run: incremental,
+zero added, zero refetched. Gap recovery is unit-tested only — it needs a week-old
+watermark to reproduce live.
+
+Two things the real mailbox said that fixtures did not:
+
+- **The HTML path is the main path, not the fallback.** 24 of 25 messages were
+  Gmail-categorised automated mail, and **zero** messages came back with no extractable
+  text — meaning `html_to_text` carried almost all of it. Treating HTML as a fallback is
+  right by preference order and wrong by volume; it deserves the same care as the
+  `text/plain` path, not less.
+- **Extraction quality holds up.** Automated mail landed at ~3,800 chars over ~16 lines —
+  roughly 236 characters per line, which is prose paragraphs rather than the short-line
+  navigation soup that badly stripped HTML produces. Worth re-measuring the same way if the
+  stripper is ever changed.
+
+Quoted history was rare in this sample (1 message of 25), which is what an inbox of
+automated mail looks like. It says nothing about the quoting rules; a mailbox of real
+correspondence is still the test that matters for those.
+
 ## Quoting
 
 Every rule is a convention, not a standard — only `-- ` is specified (RFC 3676). So each is
