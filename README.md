@@ -91,6 +91,23 @@ keeps a history stream, and can expire a watermark on demand — because "resync
 nothing" and "an expired watermark recovers" are the two properties that cannot be checked
 by reading the code.
 
+## For a model to call
+
+```bash
+./mcp                            # MCP server on stdio
+```
+
+Five tools, the same operations the CLI uses: `status`, `sync`, `list_threads`,
+`read_thread`, `search`. Only `sync` is marked as writing, and it writes to the local
+mailbox file rather than to Gmail.
+
+**This door opened before the send gate exists, and that is safe for a structural reason
+rather than a careful one:** the OAuth scope is `gmail.readonly`, so the tool is incapable
+of sending, replying or deleting. The capability is absent, not merely ungranted. When
+drafting and sending arrive, they arrive with the gate.
+
+Paths and credentials are injected: `MAIL_AI_STORE`, `MAIL_AI_CREDENTIALS`, `MAIL_AI_TOKEN`.
+
 ## Not built yet
 
 Drafting, the send gate, and the MCP front door. The read path is deliberately complete and
