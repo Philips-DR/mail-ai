@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS messages (
     body                TEXT,
     quoted              TEXT,
     labels              TEXT,
-    attachments         TEXT
+    attachments         TEXT,
+    rfc822_message_id   TEXT
 );
 CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread_id, internal_date);
 CREATE INDEX IF NOT EXISTS messages_date   ON messages(internal_date DESC);
@@ -54,12 +55,31 @@ class StoredMessage:
     labels: list[str]
 
 
+# Columns added after the first release. A mailbox is a local cache that can always be
+# rebuilt, so migrating is adding the column and letting the next sync fill it -- there is
+# no data to preserve and no version table to maintain.
+ADDED_COLUMNS = {
+    # The ORIGINAL message's RFC 822 Message-ID, which is not Gmail's own message id.
+    # Replying without it threads correctly in Gmail's UI and nowhere else.
+    "rfc822_message_id": "TEXT",
+}
+
+
 def open_store(path: Path) -> sqlite3.Connection:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(path))
     connection.row_factory = sqlite3.Row
     connection.executescript(SCHEMA)
+    _migrate(connection)
     return connection
+
+
+def _migrate(connection: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in connection.execute("PRAGMA table_info(messages)")}
+    for column, kind in ADDED_COLUMNS.items():
+        if column not in existing:
+            connection.execute(f"ALTER TABLE messages ADD COLUMN {column} {kind}")
+    connection.commit()
 
 
 def upsert_message(connection: sqlite3.Connection, message: dict[str, Any]) -> None:
@@ -68,17 +88,20 @@ def upsert_message(connection: sqlite3.Connection, message: dict[str, Any]) -> N
         """
         INSERT INTO messages (id, thread_id, internal_date, from_addr, to_addr, cc_addr,
                               subject, normalised_subject, snippet, body, quoted, labels,
-                              attachments)
+                              attachments, rfc822_message_id)
         VALUES (:id, :thread_id, :internal_date, :from_addr, :to_addr, :cc_addr, :subject,
-                :normalised_subject, :snippet, :body, :quoted, :labels, :attachments)
+                :normalised_subject, :snippet, :body, :quoted, :labels, :attachments,
+                :rfc822_message_id)
         ON CONFLICT(id) DO UPDATE SET
             thread_id=excluded.thread_id, internal_date=excluded.internal_date,
             from_addr=excluded.from_addr, to_addr=excluded.to_addr, cc_addr=excluded.cc_addr,
             subject=excluded.subject, normalised_subject=excluded.normalised_subject,
             snippet=excluded.snippet, body=excluded.body, quoted=excluded.quoted,
-            labels=excluded.labels, attachments=excluded.attachments
+            labels=excluded.labels, attachments=excluded.attachments,
+            rfc822_message_id=excluded.rfc822_message_id
         """,
         {
+            "rfc822_message_id": "",
             **message,
             "labels": json.dumps(message.get("labels", [])),
             "attachments": json.dumps(message.get("attachments", [])),
@@ -163,8 +186,8 @@ def threads(connection: sqlite3.Connection, limit: int = 20) -> list[dict[str, A
 
 def thread_messages(connection: sqlite3.Connection, thread_id: str) -> list[dict[str, Any]]:
     rows = connection.execute(
-        "SELECT id, from_addr, to_addr, subject, internal_date, body, labels "
-        "FROM messages WHERE thread_id = ? ORDER BY internal_date ASC",
+        "SELECT id, from_addr, to_addr, subject, internal_date, body, labels, "
+        "rfc822_message_id FROM messages WHERE thread_id = ? ORDER BY internal_date ASC",
         (thread_id,),
     ).fetchall()
     return [{**dict(row), "labels": json.loads(row["labels"] or "[]")} for row in rows]

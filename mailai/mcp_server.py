@@ -2,11 +2,14 @@
 
 Both doors sit directly on operations.py; neither wraps the other.
 
-Every tool here is either read-only or writes to the local mailbox file, and nothing can
-reach the outside world: the OAuth scope is gmail.readonly, so this door is structurally
-incapable of sending, replying or deleting anything in Gmail. That is why it can be opened
-before the send gate exists rather than after -- the capability simply is not there to
-misuse. When drafting and sending arrive, they arrive with the gate.
+Drafting and sending are registered **only when the caller supplies a compose credential**.
+A server built without one does not merely refuse those tools, it does not have them: a
+model cannot call a tool that was never advertised, which is a stronger guarantee than a
+tool that checks a flag.
+
+When they are registered, `send_draft` takes a draft id and a confirmation and nothing
+else. There is no tool on this door that accepts message content and sends it, so
+"compose and send in one step" is not a mistake a caller can make.
 """
 
 from __future__ import annotations
@@ -21,9 +24,15 @@ from mcp.types import ToolAnnotations
 from mailai.auth import AuthConfig
 from mailai.operations import (
     as_dict,
+    discard_draft,
+    draft_new,
+    draft_reply,
+    list_drafts,
     list_threads,
     read_thread,
+    review_draft,
     search_mail,
+    send_draft,
     status,
     sync_mailbox,
 )
@@ -42,7 +51,9 @@ def _failed(error: Exception) -> dict:
     return {"error": str(error)}
 
 
-def create_mail_ai_server(paths: ServerPaths, auth: AuthConfig) -> MCPServer:
+def create_mail_ai_server(paths: ServerPaths, auth: AuthConfig,
+                          compose_auth: AuthConfig | None = None) -> MCPServer:
+    """`compose_auth` is what turns drafting on. Omit it and this door cannot draft or send."""
     server = MCPServer(name="mail-ai", version=VERSION)
 
     @server.tool(
@@ -128,6 +139,108 @@ def create_mail_ai_server(paths: ServerPaths, auth: AuthConfig) -> MCPServer:
         except (OSError, ValueError) as error:
             return _failed(error)
 
+    if compose_auth is None:
+        return server
+
+    @server.tool(
+        name="draft_reply",
+        title="Draft a reply in a thread",
+        description=(
+            "Write a reply to an existing thread and leave it as a draft. Sends nothing. "
+            "The recipient, subject and threading headers come from what was synced, so "
+            "the reply threads correctly in clients other than Gmail too. Returns a draft "
+            "id and a confirmation; read it back with review_draft before sending."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, open_world_hint=True
+        ),
+    )
+    def _draft_reply(thread_id: str, body: str) -> dict:
+        try:
+            return as_dict(draft_reply(compose_auth, paths.store, thread_id, body))
+        except Exception as error:
+            return _failed(error)
+
+    @server.tool(
+        name="draft_new",
+        title="Write a new draft",
+        description=(
+            "Compose a new message and leave it as a draft. Sends nothing. Returns a draft "
+            "id and a confirmation; read it back with review_draft before sending."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, open_world_hint=True
+        ),
+    )
+    def _draft_new(to: str, subject: str, body: str, cc: str = "") -> dict:
+        try:
+            return as_dict(draft_new(compose_auth, to, subject, body, cc=cc))
+        except Exception as error:
+            return _failed(error)
+
+    @server.tool(
+        name="list_drafts",
+        title="List drafts",
+        description="Draft ids and the threads they belong to. Sends nothing.",
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
+    )
+    def _list_drafts(limit: int = 25) -> dict:
+        try:
+            return {"drafts": list_drafts(compose_auth, limit=limit)}
+        except Exception as error:
+            return _failed(error)
+
+    @server.tool(
+        name="review_draft",
+        title="Read a draft, and get the token that would send it",
+        description=(
+            "Show a draft exactly as it currently stands, with the confirmation that "
+            "authorises sending that exact content. Editing the draft afterwards "
+            "invalidates the confirmation, so a draft can only be sent in the state it was "
+            "last read in. Sends nothing."
+        ),
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
+    )
+    def _review_draft(draft_id: str) -> dict:
+        try:
+            return as_dict(review_draft(compose_auth, draft_id))
+        except Exception as error:
+            return _failed(error)
+
+    @server.tool(
+        name="send_draft",
+        title="Send a reviewed draft",
+        description=(
+            "Send an existing draft. THIS LEAVES THE MACHINE AND CANNOT BE UNDONE. "
+            "Requires the confirmation from review_draft, and refuses if the draft has "
+            "changed since. There is deliberately no way to pass message content here: to "
+            "send something, draft it, review it, then send that draft."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False,
+            open_world_hint=True,
+        ),
+    )
+    def _send_draft(draft_id: str, confirmation: str) -> dict:
+        try:
+            return as_dict(send_draft(compose_auth, draft_id, confirmation))
+        except Exception as error:
+            return _failed(error)
+
+    @server.tool(
+        name="discard_draft",
+        title="Delete a draft",
+        description="Permanently delete a draft. Sends nothing, but cannot be undone.",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, open_world_hint=True
+        ),
+    )
+    def _discard_draft(draft_id: str) -> dict:
+        try:
+            return discard_draft(compose_auth, draft_id)
+        except Exception as error:
+            return _failed(error)
+
     return server
 
 
@@ -135,7 +248,13 @@ def main() -> None:
     """The one place this entry point reaches for the environment, named so it is visible."""
     root = Path(__file__).resolve().parent.parent
     paths = ServerPaths(store=Path(os.environ.get("MAIL_AI_STORE", root / "mailbox.sqlite3")))
-    create_mail_ai_server(paths, AuthConfig.from_environment()).run(transport="stdio")
+
+    # Drafting is off unless asked for, and asking is a deliberate act: MAIL_AI_COMPOSE=1
+    # in the server's own environment. Without it this door has no sending tool at all.
+    compose = AuthConfig.from_environment(compose=True) if os.environ.get(
+        "MAIL_AI_COMPOSE"
+    ) else None
+    create_mail_ai_server(paths, AuthConfig.from_environment(), compose).run(transport="stdio")
 
 
 if __name__ == "__main__":

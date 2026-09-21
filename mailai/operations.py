@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from mailai import store as db
-from mailai.auth import AuthConfig, load_credentials
+from mailai.auth import AuthConfig, NotAuthorised, load_credentials
 from mailai.sync import FULL_SYNC_DONE, HISTORY_KEY, Progress, sync
 
 
@@ -146,3 +146,142 @@ def search_mail(store_path: Path, text: str, limit: int = 20) -> list[dict[str, 
 
 def as_dict(value: object) -> dict:
     return asdict(value)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Drafting and sending
+# ---------------------------------------------------------------------------
+
+class NeedsComposeScope(Exception):
+    """A read-only token cannot draft. Raised before any network call is made."""
+
+
+def _compose_service(auth: AuthConfig):
+    """Every drafting operation goes through here, so the scope check cannot be skipped."""
+    from mailai.client import build_service
+
+    if not auth.can_send:
+        raise NeedsComposeScope(
+            "this needs a drafting token. Run: ./mail auth --compose\n"
+            "  Note that Gmail's compose scope also grants sending; the send gate, not the "
+            "scope, is what stops mail leaving."
+        )
+    return build_service(load_credentials(auth))
+
+
+@dataclass(frozen=True)
+class DraftReport:
+    draft_id: str
+    to: str
+    subject: str
+    thread_id: str
+    confirmation: str
+
+
+def _report(draft_id: str, composition, thread_id: str) -> DraftReport:
+    return DraftReport(
+        draft_id=draft_id,
+        to=composition.to,
+        subject=composition.subject,
+        thread_id=thread_id,
+        # Minted here so the caller that just wrote the draft can send it without a second
+        # read -- but it is still a fingerprint of content, so it stops working the moment
+        # anything edits the draft.
+        confirmation=composition.fingerprint(),
+    )
+
+
+def draft_new(auth: AuthConfig, to: str, subject: str, body: str,
+              cc: str = "", bcc: str = "") -> DraftReport:
+    """Write a new draft. Creates nothing in anyone else's mailbox."""
+    from mailai import drafts
+    from mailai.compose import Composition
+
+    service = _compose_service(auth)
+    composition = Composition(to=to, subject=subject, body=body, cc=cc, bcc=bcc)
+    created = drafts.create(service, composition)
+    return _report(str(created["id"]), composition, "")
+
+
+def draft_reply(auth: AuthConfig, store_path: Path, thread_id: str, body: str) -> DraftReport:
+    """Reply in an existing thread, threaded correctly for clients that are not Gmail.
+
+    The recipient, subject and Message-ID all come from the local store rather than a
+    fresh fetch -- the sync already has them, and reading them offline means a draft can be
+    written from what was synced rather than from whatever the mailbox looks like now.
+    """
+    from mailai import drafts
+    from mailai.compose import Composition, reply_subject
+
+    service = _compose_service(auth)
+    connection = db.open_store(store_path)
+    messages = db.thread_messages(connection, thread_id)
+    if not messages:
+        raise ValueError(f"no thread {thread_id} in {store_path}. Sync first.")
+
+    last = messages[-1]
+    composition = Composition(
+        to=last["from_addr"],
+        subject=reply_subject(last.get("subject", "")),
+        body=body,
+        in_reply_to=last.get("rfc822_message_id") or "",
+    )
+    created = drafts.create(service, composition, thread_id=thread_id)
+    return _report(str(created["id"]), composition, thread_id)
+
+
+@dataclass(frozen=True)
+class ReviewReport:
+    draft_id: str
+    thread_id: str
+    rendered: str
+    confirmation: str
+
+
+def review_draft(auth: AuthConfig, draft_id: str) -> ReviewReport:
+    """Read a draft as it currently stands, and mint the token that authorises sending it."""
+    from mailai import sending
+
+    reviewed = sending.review(_compose_service(auth), draft_id)
+    return ReviewReport(
+        draft_id=reviewed.draft_id,
+        thread_id=reviewed.thread_id,
+        rendered=reviewed.rendered(),
+        confirmation=reviewed.confirmation,
+    )
+
+
+def list_drafts(auth: AuthConfig, limit: int = 25) -> list[dict[str, Any]]:
+    from mailai import drafts
+
+    service = _compose_service(auth)
+    return [
+        {"draft_id": str(d.get("id", "")), "thread_id": str(d.get("message", {}).get("threadId", ""))}
+        for d in drafts.list_all(service, limit=limit)
+    ]
+
+
+def discard_draft(auth: AuthConfig, draft_id: str) -> dict[str, str]:
+    from mailai import drafts
+
+    drafts.delete(_compose_service(auth), draft_id)
+    return {"discarded": draft_id}
+
+
+@dataclass(frozen=True)
+class SendReport:
+    draft_id: str
+    message_id: str
+    thread_id: str
+
+
+def send_draft(auth: AuthConfig, draft_id: str, confirmation: str) -> SendReport:
+    """Send a draft that still says what was reviewed. The only operation that leaves."""
+    from mailai import sending
+
+    sent = sending.send(_compose_service(auth), draft_id, confirmation)
+    return SendReport(
+        draft_id=draft_id,
+        message_id=str(sent.get("id", "")),
+        thread_id=str(sent.get("threadId", "")),
+    )

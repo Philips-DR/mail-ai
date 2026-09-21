@@ -75,6 +75,9 @@ def to_row(message: dict[str, Any]) -> dict[str, Any]:
         "quoted": quoted,
         "labels": list(message.get("labelIds", []) or []),
         "attachments": attachments(payload),
+        # Kept so a reply can carry In-Reply-To/References. Gmail's own message id is not
+        # a substitute: every non-Gmail client threads on this header.
+        "rfc822_message_id": head.get("message-id", ""),
     }
 
 

@@ -74,11 +74,37 @@ Threads are **derived by query, not stored**. A thread is not an independent fac
 whatever messages share a threadId — and a separate table is two things that can disagree
 with no way to tell which is right.
 
+## The send gate
+
+- **`send` has no content parameter, and a test asserts it.** If `to` or `body` ever appears
+  on it, compose-and-send becomes possible in one call and every other guarantee here is
+  decoration.
+- **Drafting and sending live in separate modules.** Nothing in `drafts.py` puts mail in
+  front of anyone, so nothing there can be called by accident and have it leave.
+- **The confirmation fingerprints content, not the draft id.** The id does not change when
+  the draft does, so an id alone would authorise sending something nobody read. `bcc` is
+  inside the fingerprint deliberately — silently adding a recipient is the edit a rendered
+  review is least likely to reveal.
+- A refusal is the mechanism working. It gets its own exception type and its own exit code
+  so it never reads as a fault.
+- **`review` must stay read-only.** If reading a draft needs approval, approving becomes two
+  approvals and people stop reading the thing they are approving.
+
 ## Scopes
 
-Narrowest that works, added by the milestone that earns them. `gmail.readonly` today. A
-token minted for a scope the code cannot use is an unforced risk, and widening forces a
-re-consent anyway.
+Narrowest that works, added by the milestone that earns them, and each in **its own token
+file** so a read-only run cannot silently pick up a send-capable credential.
+
+**`gmail.compose` grants sending, not just drafting** — "Manage drafts and send emails",
+and there is no draft-only scope. The scope therefore cannot separate drafting from
+sending; only the code can. This was checked against Google's scope reference before the
+design was written, and it inverted the plan: the original sequencing assumed compose for
+M2 and send for M3 would provide the separation, and it provides none.
+
+**Only `auth` may open a browser.** `load_credentials` raises unless `interactive=True`, and
+only the auth command passes it. Found the hard way: `send` with no cached token launched a
+consent flow and hung. From the MCP door that would block a model's tool call on a window
+nobody is looking at.
 
 ## Testing
 

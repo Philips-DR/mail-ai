@@ -54,12 +54,11 @@ def test_the_door_advertises_exactly_the_read_path_and_sync(server):
     assert names == ["list_threads", "read_thread", "search", "status", "sync"]
 
 
-def test_nothing_here_can_send_reply_or_delete(server):
-    """The door opened before the send gate exists, which is only safe because the
-    capability is absent rather than merely ungranted. If a sending tool ever appears here
-    without a gate, this test is the thing that should have stopped it."""
+def test_without_a_compose_credential_the_door_cannot_send_at_all(server):
+    """Not "refuses to send" -- has no tool for it. A model cannot call a tool that was
+    never advertised, which is a stronger guarantee than one that checks a flag."""
     names = {t.name for t in asyncio.run(server.list_tools())}
-    assert not names & {"send", "reply", "draft", "delete", "trash", "archive"}
+    assert not names & {"send_draft", "draft_new", "draft_reply", "discard_draft"}
 
 
 def test_only_sync_is_marked_as_writing(server):
@@ -109,3 +108,53 @@ def test_nothing_is_written_to_stdout_while_a_tool_runs(server):
 def test_a_sync_without_credentials_reports_rather_than_crashing(server):
     """The one tool that needs the network must fail like every other tool here."""
     assert "error" in call(server, "sync", limit=1)
+
+
+# ---------------------------------------------------------------------------
+# Drafting, once a compose credential is supplied
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def composing_server(store_path, tmp_path):
+    from mailai.auth import COMPOSE_SCOPES
+
+    return create_mail_ai_server(
+        ServerPaths(store=store_path),
+        AuthConfig(credentials_path=tmp_path / "c.json", token_path=tmp_path / "t.json"),
+        AuthConfig(credentials_path=tmp_path / "c.json", token_path=tmp_path / "tc.json",
+                   scopes=tuple(COMPOSE_SCOPES)),
+    )
+
+
+def test_a_compose_credential_turns_drafting_on(composing_server):
+    names = {t.name for t in asyncio.run(composing_server.list_tools())}
+    assert {"draft_new", "draft_reply", "review_draft", "send_draft"} <= names
+
+
+def test_send_is_the_only_tool_marked_destructive(composing_server):
+    """Everything else can be repeated or undone. Sending cannot."""
+    destructive = {
+        t.name for t in asyncio.run(composing_server.list_tools())
+        if t.annotations and t.annotations.destructive_hint
+    }
+    assert "send_draft" in destructive
+    assert "draft_new" not in destructive
+    assert "draft_reply" not in destructive
+
+
+def test_no_tool_on_this_door_takes_content_and_sends_it(composing_server):
+    """Compose-and-send in one call is not something a caller has to avoid; it is not
+    offered. send_draft takes an id and a confirmation, and nothing else."""
+    send_tool = next(
+        t for t in asyncio.run(composing_server.list_tools()) if t.name == "send_draft"
+    )
+    assert set(send_tool.input_schema["properties"]) == {"draft_id", "confirmation"}
+
+
+def test_review_is_read_only_so_it_can_be_run_unattended(composing_server):
+    """Reading a draft to decide whether to send it must never itself need approval, or the
+    approval step becomes two approvals and people stop reading."""
+    review = next(
+        t for t in asyncio.run(composing_server.list_tools()) if t.name == "review_draft"
+    )
+    assert review.annotations.read_only_hint is True
