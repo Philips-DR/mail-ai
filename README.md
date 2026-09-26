@@ -38,6 +38,12 @@ refetching the whole mailbox would hide real bugs behind a very expensive retry.
 **A label change does not refetch the message.** Reading, archiving and starring are the
 common case by a wide margin and none of them changes the message.
 
+**`INBOX` and `SENT` are both synced by default.** A message you sent never carries the
+INBOX label, so syncing INBOX alone meant the tool could send mail it would never see
+again — and a thread you had replied to read as though you never answered. Found by
+actually sending one. Gmail's history API takes a single label, so each carries its own
+watermark; a message in both is simply upserted twice, which the store is built to survive.
+
 **An interrupted first sync resumes.** Re-listing ids is cheap and anything already stored
 is skipped, so no extra bookkeeping is needed. The watermark is only written once the pass
 completes, so an interrupted run correctly starts over rather than believing it finished.

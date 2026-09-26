@@ -43,7 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="What the local mailbox holds. Offline, no credentials")
 
     s = sub.add_parser("sync", help="Bring the local mailbox level with Gmail")
-    s.add_argument("-l", "--label", default="INBOX", help="Label to sync. 'all' for everything")
+    s.add_argument("-l", "--label", default="INBOX,SENT",
+                   help="Labels to sync, comma-separated. 'all' for everything. SENT is in "
+                        "the default because otherwise mail you send is never seen again")
     s.add_argument("-n", "--limit", type=int, default=None,
                    help="Stop after this many messages on a full sync")
 
@@ -109,9 +111,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "sync":
-            label = None if args.label.lower() == "all" else args.label
+            labels = ([None] if args.label.lower() == "all"
+                      else [part.strip() for part in args.label.split(",") if part.strip()])
             print(f"→  syncing {args.label}")
-            report = sync_mailbox(auth, store_path, label=label, limit=args.limit,
+            report = sync_mailbox(auth, store_path, labels=labels, limit=args.limit,
                                   progress=lambda m: print(m))
             if report.recovered_gap:
                 print("   the watermark had expired; recovered with a full resync")

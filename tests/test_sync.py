@@ -142,3 +142,46 @@ def test_thread_messages_come_back_in_the_order_they_were_sent(gmail, connection
     sync(gmail, connection, label="INBOX")
     ordered = thread_messages(connection, "t1")
     assert [m["id"] for m in ordered] == ["m1", "m2"]
+
+
+# ---------------------------------------------------------------------------
+# Per-label watermarks
+# ---------------------------------------------------------------------------
+
+def test_each_label_carries_its_own_watermark():
+    """Gmail's history API takes one label at a time, so one shared watermark would let a
+    sync of SENT tell the next sync of INBOX that its changes had been handled."""
+    from mailai.sync import full_sync_key, history_key
+
+    assert history_key("SENT") != history_key("INBOX")
+    assert full_sync_key("SENT") != full_sync_key("INBOX")
+
+
+def test_inbox_keeps_the_unsuffixed_key_so_existing_mailboxes_do_not_resync():
+    """A mailbox synced before labels were plural has its watermark under the bare key.
+    Renaming it would silently trigger a full resync of everything already stored."""
+    from mailai.sync import HISTORY_KEY, full_sync_key, history_key
+
+    assert history_key("INBOX") == HISTORY_KEY
+    assert history_key(None) == HISTORY_KEY
+    assert full_sync_key("INBOX") == "full_sync_complete"
+
+
+def test_syncing_one_label_does_not_advance_anothers_watermark(gmail, connection):
+    from mailai.store import get_state
+    from mailai.sync import history_key
+
+    sync(gmail, connection, label="INBOX")
+    assert get_state(connection, history_key("INBOX")) == "500"
+    assert get_state(connection, history_key("SENT")) is None
+
+
+def test_a_message_carrying_two_synced_labels_is_stored_once(gmail, connection):
+    """A reply is in both INBOX and SENT for the recipient of its own thread. Two passes
+    over it must upsert, not duplicate."""
+    from mailai.store import message_count
+
+    gmail.mailbox["m1"]["labelIds"] = ["INBOX", "SENT"]
+    sync(gmail, connection, label="INBOX")
+    sync(gmail, connection, label="SENT")
+    assert message_count(connection) == 3

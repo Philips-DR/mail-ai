@@ -7,6 +7,7 @@ and summarising are a later milestone and land in one declared seam above this.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,6 +50,12 @@ def status(store_path: Path) -> MailboxStatus:
     )
 
 
+# INBOX alone leaves a hole: a message you SENT never carries the INBOX label, so the tool
+# could send mail it would never see again and a thread you replied to would read as though
+# you never answered. Found by actually sending one.
+DEFAULT_LABELS: tuple[str, ...] = ("INBOX", "SENT")
+
+
 @dataclass(frozen=True)
 class SyncReport:
     mode: str
@@ -58,24 +65,43 @@ class SyncReport:
     relabelled: int
     recovered_gap: bool
     messages_total: int
+    per_label: dict[str, str] = field(default_factory=dict)
 
 
-def sync_mailbox(auth: AuthConfig, store_path: Path, label: str | None = "INBOX",
-                 limit: int | None = None, progress: Progress = lambda _m: None) -> SyncReport:
-    """Bring the local mailbox level with Gmail. The only operation that needs the network."""
+def sync_mailbox(auth: AuthConfig, store_path: Path,
+                 labels: Sequence[str | None] = DEFAULT_LABELS,
+                 limit: int | None = None,
+                 progress: Progress = lambda _m: None) -> SyncReport:
+    """Bring the local mailbox level with Gmail. The only operation that needs the network.
+
+    One pass per label, because Gmail's history API takes one label at a time and each
+    therefore carries its own watermark. A message with two of them is simply upserted
+    twice, which the store is built to survive.
+    """
     from mailai.client import build_service
 
     connection = db.open_store(store_path)
     service = build_service(load_credentials(auth))
-    result = sync(service, connection, label=label, limit=limit, progress=progress)
+
+    totals = {"added": 0, "updated": 0, "deleted": 0, "relabelled": 0}
+    modes: dict[str, str] = {}
+    recovered = False
+
+    for label in labels:
+        name = label or "all"
+        progress(f"   {name}")
+        result = sync(service, connection, label=label, limit=limit, progress=progress)
+        for key in totals:
+            totals[key] += getattr(result, key)
+        modes[name] = result.mode
+        recovered = recovered or result.recovered_gap
+
     return SyncReport(
-        mode=result.mode,
-        added=result.added,
-        updated=result.updated,
-        deleted=result.deleted,
-        relabelled=result.relabelled,
-        recovered_gap=result.recovered_gap,
+        mode="+".join(sorted(set(modes.values()))) or "none",
+        **totals,
+        recovered_gap=recovered,
         messages_total=db.message_count(connection),
+        per_label=modes,
     )
 
 

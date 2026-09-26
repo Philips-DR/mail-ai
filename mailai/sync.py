@@ -32,6 +32,19 @@ from mailai.store import (
 HISTORY_KEY = "history_id"
 FULL_SYNC_DONE = "full_sync_complete"
 
+# Gmail's history API takes ONE label, so each label tracked needs its own watermark. The
+# unsuffixed keys stay meaning INBOX, so a mailbox synced before this existed keeps its
+# watermark instead of silently starting a full resync.
+LEGACY_LABEL = "INBOX"
+
+
+def history_key(label: str | None) -> str:
+    return HISTORY_KEY if label in (None, LEGACY_LABEL) else f"{HISTORY_KEY}:{label}"
+
+
+def full_sync_key(label: str | None) -> str:
+    return FULL_SYNC_DONE if label in (None, LEGACY_LABEL) else f"{FULL_SYNC_DONE}:{label}"
+
 Progress = Callable[[str], None]
 
 
@@ -118,8 +131,8 @@ def full_sync(service, connection, label: str | None = None, limit: int | None =
             connection.commit()
             progress(f"   {result.added} fetched")
 
-    set_state(connection, HISTORY_KEY, watermark)
-    set_state(connection, FULL_SYNC_DONE, "1")
+    set_state(connection, history_key(label), watermark)
+    set_state(connection, full_sync_key(label), "1")
     connection.commit()
     result.history_id = watermark
     return result
@@ -129,7 +142,7 @@ def incremental_sync(service, connection, label: str | None = None,
                      progress: Progress = lambda _m: None) -> SyncResult:
     """Apply every change since the watermark. Raises if the watermark is too old."""
     result = SyncResult(mode="incremental")
-    watermark = get_state(connection, HISTORY_KEY) or ""
+    watermark = get_state(connection, history_key(label)) or ""
     records, latest = gmail.list_history(service, watermark, label=label)
 
     for record in records:
@@ -156,7 +169,7 @@ def incremental_sync(service, connection, label: str | None = None,
                            [l for l in labels_of(connection, message_id) if l not in gone])
                 result.relabelled += 1
 
-    set_state(connection, HISTORY_KEY, latest)
+    set_state(connection, history_key(label), latest)
     connection.commit()
     result.history_id = latest
     return result
@@ -179,7 +192,7 @@ def is_gap(error: Exception) -> bool:
 def sync(service, connection, label: str | None = None, limit: int | None = None,
          progress: Progress = lambda _m: None) -> SyncResult:
     """The one entry point: incremental when possible, full when necessary."""
-    if get_state(connection, HISTORY_KEY) and get_state(connection, FULL_SYNC_DONE):
+    if get_state(connection, history_key(label)) and get_state(connection, full_sync_key(label)):
         try:
             return incremental_sync(service, connection, label=label, progress=progress)
         except Exception as error:

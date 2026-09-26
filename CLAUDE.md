@@ -24,6 +24,13 @@ to the wrong person.
 - **Label changes never refetch.** They are the common case and they do not change the
   message.
 - Resumability needs no extra state: re-list ids, skip what is already stored.
+- **One watermark per label.** Gmail's history API takes a single label, so a shared
+  watermark would let a sync of SENT tell the next sync of INBOX that its changes were
+  handled. INBOX keeps the unsuffixed key so mailboxes synced before this existed do not
+  silently full-resync.
+- **SENT is synced by default, not just INBOX.** A sent message never carries INBOX, so
+  INBOX-only meant sending mail the tool would never see again — a thread you replied to
+  read as though you never answered. Only visible after actually sending one.
 
 ## MIME
 

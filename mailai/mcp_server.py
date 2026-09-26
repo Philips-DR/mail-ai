@@ -113,10 +113,11 @@ def create_mail_ai_server(paths: ServerPaths, auth: AuthConfig,
             open_world_hint=True,
         ),
     )
-    def _sync(label: str = "INBOX", limit: int | None = None) -> dict:
+    def _sync(label: str = "INBOX,SENT", limit: int | None = None) -> dict:
         try:
-            target = None if label.lower() == "all" else label
-            return as_dict(sync_mailbox(auth, paths.store, label=target, limit=limit))
+            targets = ([None] if label.lower() == "all"
+                       else [p.strip() for p in label.split(",") if p.strip()])
+            return as_dict(sync_mailbox(auth, paths.store, labels=targets, limit=limit))
         except Exception as error:
             return _failed(error)
 
